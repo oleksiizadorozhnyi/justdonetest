@@ -1,0 +1,44 @@
+version: '3.8'
+
+
+
+services:
+  db:
+    image: postgres:15
+    container_name: order_db
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: orders
+      DATABASE_URL: postgres://user:password@order_db:5432/orders?sslmode=disable
+    ports:
+      - "5432:5432"
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    networks:
+      - app-network
+
+  app:
+    build:
+      context: .
+    container_name: order_service
+    environment:
+      DATABASE_URL: "postgres://user:password@db:5432/orders?sslmode=disable"
+    ports:
+      - "8080:8080"
+    entrypoint: >
+      sh -c "
+      go install github.com/pressly/goose/v3/cmd/goose@latest &&
+      goose -dir /migrations postgres $DATABASE_URL up
+      "
+    depends_on:
+      - db
+    networks:
+      - app-network
+
+networks:
+  app-network:
+    driver: bridge
+
+volumes:
+  db_data:
