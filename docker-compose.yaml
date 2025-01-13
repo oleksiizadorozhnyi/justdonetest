@@ -10,29 +10,40 @@ services:
       POSTGRES_USER: user
       POSTGRES_PASSWORD: password
       POSTGRES_DB: orders
-      DATABASE_URL: postgres://user:password@order_db:5432/orders?sslmode=disable
     ports:
       - "5432:5432"
     volumes:
       - db_data:/var/lib/postgresql/data
     networks:
       - app-network
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U user" ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
   app:
     build:
       context: .
     container_name: order_service
     environment:
-      DATABASE_URL: "postgres://user:password@db:5432/orders?sslmode=disable"
+      SERVER_PORT: ":8080"
+      DB_USER: "user"
+      DB_PASSWORD: "password"
+      DB_HOST: "db"
+      DB_PORT: "5432"
+      DB_NAME: "orders"
+      SSL_MODE: "disable"
     ports:
       - "8080:8080"
     entrypoint: >
-      sh -c "
-      go install github.com/pressly/goose/v3/cmd/goose@latest &&
-      goose -dir /migrations postgres $DATABASE_URL up
-      "
+      bash -c "
+        goose -dir /migrations postgres postgres://user:password@db:5432/orders?sslmode=disable up &&
+        ./app
+        "
     depends_on:
-      - db
+      db:
+          condition: service_healthy
     networks:
       - app-network
 

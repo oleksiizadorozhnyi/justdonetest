@@ -1,8 +1,8 @@
 package service
 
 import (
+	"JustDone/internal/models"
 	repository "JustDone/internal/repository/postgres"
-	"database/sql"
 	"errors"
 )
 
@@ -14,46 +14,26 @@ func NewOrderService(repo *repository.OrderRepo) (*OrderService, error) {
 	return &OrderService{repo: repo}, nil
 }
 
-func (s *OrderService) CreateOrUpdateOrder(webhookData map[string]interface{}) error {
-	// Validate and process webhook data
-	orderID := webhookData["order_id"].(string)
-	eventID := webhookData["event_id"].(string)
-	_ = webhookData["status"].(string)
-
-	if s.repo.IsEventProcessed(eventID) {
+func (s *OrderService) CreateOrUpdateOrder(event models.WebhookPayload) error {
+	if s.repo.IsEventProcessed(event.EventID) {
 		return errors.New("event already processed")
 	}
 
-	if s.repo.IsOrderFinalized(orderID) {
+	if s.repo.IsOrderFinalized(event.OrderID) {
 		return errors.New("order is in final state")
 	}
 
-	return s.repo.SaveOrderAndEvent(webhookData)
+	return s.repo.SaveOrderAndEvent(event)
 }
 
-func (s *OrderService) GetOrders(filters map[string][]string) ([]map[string]interface{}, error) {
+func (s *OrderService) GetOrders(filters models.OrderFilter) ([]models.OrderResponse, error) {
 	return s.repo.FetchOrders(filters)
 }
 
-func (s *OrderService) GetOrderDetails(orderID string) (map[string]interface{}, error) {
-	// Fetch order details from the repository
-	order, err := s.repo.GetOrderDetails(orderID)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil, errors.New("order not found")
-		}
-		return nil, err
-	}
-
-	return order, nil
+func (s *OrderService) GetOrderDetails(orderID string) (*models.OrderResponse, error) {
+	return s.repo.GetOrderDetails(orderID)
 }
 
-func (s *OrderService) GetOrderEvents(orderID string) ([]map[string]interface{}, error) {
-	// Fetch events from the repository
-	events, err := s.repo.GetOrderEvents(orderID)
-	if err != nil {
-		return nil, err
-	}
-
-	return events, nil
+func (s *OrderService) GetOrderEvents(orderID string) ([]models.OrderEvent, error) {
+	return s.repo.GetOrderEvents(orderID)
 }

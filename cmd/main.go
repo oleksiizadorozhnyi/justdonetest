@@ -1,13 +1,15 @@
 package main
 
 import (
+	"JustDone/internal/config"
 	repository "JustDone/internal/repository/postgres"
 	"JustDone/internal/server"
-	service2 "JustDone/internal/service"
+	"JustDone/internal/service"
 	"fmt"
 	"go.uber.org/zap"
-	"log"
 	"os"
+	"os/signal"
+	"syscall"
 )
 
 func main() {
@@ -24,28 +26,36 @@ func main() {
 	}
 	zap.ReplaceGlobals(logger)
 
-	dbString := os.Getenv("DATABASE_URL")
-	if dbString == "" {
-		log.Fatalf("DATABASE_URL is not set")
+	cfg, err := config.LoadConfig()
+	if err != nil {
+		logger.Fatal("Failed to load config", zap.Error(err))
 	}
 
-	repo, err := repository.NewOrderRepo(dbString)
+	repo, err := repository.NewOrderRepo(cfg.Postgres)
 	if err != nil {
 		logger.Fatal(err.Error())
 	}
 
-	service, err := service2.NewOrderService(repo)
+	serviceOrder, err := service.NewOrderService(repo)
 	if err != nil {
 		logger.Fatal(err.Error())
 	}
 
-	srv, err := server.NewServer(service)
+	srv, err := server.NewServer(serviceOrder)
 	if err != nil {
 		logger.Fatal(err.Error())
 	}
 
-	fmt.Println("Server Running on 8080...")
-	if err := srv.Run(":8080"); err != nil {
-		logger.Fatal(err.Error())
-	}
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+
+	go func() {
+		logger.Info(fmt.Sprintf("Server Running on %v...", cfg.ServerPort))
+		if err := srv.Run(cfg.ServerPort); err != nil {
+			logger.Fatal(err.Error())
+		}
+	}()
+
+	<-quit
+	logger.Info("Received stop signal, shutting down the server...")
 }

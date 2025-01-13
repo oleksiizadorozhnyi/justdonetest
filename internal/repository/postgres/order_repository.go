@@ -1,10 +1,13 @@
 package repository
 
 import (
+	"JustDone/internal/config"
+	"JustDone/internal/models"
 	"database/sql"
+	"encoding/json"
 	"fmt"
-	"github.com/jackc/pgtype"
 	_ "github.com/jackc/pgx/v4/stdlib"
+	"github.com/lib/pq"
 	"strconv"
 	"strings"
 )
@@ -13,13 +16,13 @@ type OrderRepo struct {
 	db *sql.DB
 }
 
-func NewOrderRepo(conStr string) (*OrderRepo, error) {
+func NewOrderRepo(cfg config.Postgres) (*OrderRepo, error) {
+	conStr := fmt.Sprintf("postgres://%v:%v@%v:%v/%v?sslmode=%v", cfg.DBUser, cfg.DBPassword, cfg.DBHost, cfg.DBPort, cfg.DBName, cfg.SSLMode)
 	db, err := sql.Open("pgx", conStr)
 	if err != nil {
 		return nil, err
 	}
 
-	// Test the database connection
 	if err := db.Ping(); err != nil {
 		return nil, fmt.Errorf("failed to connect to database: %v", err)
 	}
@@ -39,32 +42,35 @@ func (r *OrderRepo) IsOrderFinalized(orderID string) bool {
 	return status == "failed" || status == "success"
 }
 
-func (r *OrderRepo) SaveOrderAndEvent(data map[string]interface{}) error {
+func (r *OrderRepo) SaveOrderAndEvent(event models.WebhookPayload) error {
 	tx, err := r.db.Begin()
 	if err != nil {
 		return err
 	}
 
-	// Зберігаємо ордер
-	_, err = tx.Exec(`
-		INSERT INTO orders (order_id, user_id, status, created_at, updated_at, meta)
-		VALUES ($1, $2, $3, $4, $5, $6)
-		ON CONFLICT (order_id)
-		DO UPDATE SET 
-			status = EXCLUDED.status,
-			updated_at = EXCLUDED.updated_at,
-			meta = EXCLUDED.meta
-	`, data["order_id"], data["user_id"], data["status"], data["created_at"], data["updated_at"], data["meta"])
+	metaJSON, err := json.Marshal(event.Meta)
 	if err != nil {
 		tx.Rollback()
 		return err
 	}
 
-	// Зберігаємо івент
 	_, err = tx.Exec(`
-		INSERT INTO order_events (event_id, order_id, status, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5)
-	`, data["event_id"], data["order_id"], data["status"], data["created_at"], data["updated_at"])
+        INSERT INTO orders (order_id, user_id, status, created_at, updated_at, meta)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        ON CONFLICT (order_id) DO UPDATE SET
+            status = EXCLUDED.status,
+            updated_at = EXCLUDED.updated_at,
+            meta = EXCLUDED.meta
+    `, event.OrderID, event.UserID, event.Status, event.CreatedAt, event.UpdatedAt, metaJSON)
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+
+	_, err = tx.Exec(`
+        INSERT INTO order_events (event_id, order_id, user_id, status, created_at, updated_at)
+        VALUES ($1, $2, $3, $4, $5, $6)
+    `, event.EventID, event.OrderID, event.UserID, event.Status, event.CreatedAt, event.UpdatedAt)
 	if err != nil {
 		tx.Rollback()
 		return err
@@ -73,164 +79,107 @@ func (r *OrderRepo) SaveOrderAndEvent(data map[string]interface{}) error {
 	return tx.Commit()
 }
 
-func (r *OrderRepo) FetchOrders(filters map[string][]string) ([]map[string]interface{}, error) {
+func (r *OrderRepo) FetchOrders(filter models.OrderFilter) ([]models.OrderResponse, error) {
 	query := `
-		SELECT order_id, user_id, status, created_at, updated_at
-		FROM orders
-	`
+        SELECT order_id, user_id, status, created_at, updated_at
+        FROM orders
+    `
 	args := []interface{}{}
 	whereClauses := []string{}
 
-	// Filter by statuses (optional)
-	if statuses, ok := filters["status"]; ok && len(statuses) > 0 {
+	if len(filter.Status) > 0 {
 		whereClauses = append(whereClauses, "status = ANY($"+strconv.Itoa(len(args)+1)+")")
-
-		// Use pgtype.TextArray for PostgreSQL arrays
-		textArray := &pgtype.TextArray{}
-		if err := textArray.Set(strings.Split(statuses[0], ",")); err != nil {
-			return nil, err
-		}
-		args = append(args, textArray)
+		args = append(args, pq.Array(filter.Status))
 	}
 
-	// Filter by user_id (optional)
-	if userID, ok := filters["user_id"]; ok && len(userID) > 0 {
+	if filter.UserID != "" {
 		whereClauses = append(whereClauses, "user_id = $"+strconv.Itoa(len(args)+1))
-
-		// Use pgtype.UUID for PostgreSQL UUID
-		uuid := &pgtype.UUID{}
-		if err := uuid.Set(userID[0]); err != nil {
-			return nil, err
-		}
-		args = append(args, uuid)
+		args = append(args, filter.UserID)
 	}
 
-	// Add WHERE clause if there are filters
 	if len(whereClauses) > 0 {
 		query += " WHERE " + strings.Join(whereClauses, " AND ")
 	}
 
-	// Sorting
-	sortBy := "created_at"
-	if val, ok := filters["sort_by"]; ok && len(val) > 0 {
-		sortBy = val[0]
-	}
-	sortOrder := "DESC"
-	if val, ok := filters["sort_order"]; ok && len(val) > 0 && (val[0] == "asc" || val[0] == "desc") {
-		sortOrder = strings.ToUpper(val[0])
-	}
-	query += " ORDER BY " + sortBy + " " + sortOrder
+	query += " ORDER BY " + filter.SortBy + " " + filter.SortOrder
 
-	// Pagination
-	limit := 10
-	if val, ok := filters["limit"]; ok && len(val) > 0 {
-		if parsed, err := strconv.Atoi(val[0]); err == nil {
-			limit = parsed
-		}
-	}
-	offset := 0
-	if val, ok := filters["offset"]; ok && len(val) > 0 {
-		if parsed, err := strconv.Atoi(val[0]); err == nil {
-			offset = parsed
-		}
-	}
 	query += " LIMIT $" + strconv.Itoa(len(args)+1) + " OFFSET $" + strconv.Itoa(len(args)+2)
-	args = append(args, limit, offset)
+	args = append(args, filter.Limit, filter.Offset)
 
-	// Execute the query
 	rows, err := r.db.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	// Process results
-	var orders []map[string]interface{}
+	var orders []models.OrderResponse
 	for rows.Next() {
-		var orderID, userID, status string
-		var createdAt, updatedAt string
+		var order models.OrderResponse
 
-		if err := rows.Scan(&orderID, &userID, &status, &createdAt, &updatedAt); err != nil {
+		err := rows.Scan(
+			&order.OrderID,
+			&order.UserID,
+			&order.Status,
+			&order.CreatedAt,
+			&order.UpdatedAt,
+		)
+		if err != nil {
 			return nil, err
 		}
 
-		order := map[string]interface{}{
-			"order_id":   orderID,
-			"user_id":    userID,
-			"status":     status,
-			"created_at": createdAt,
-			"updated_at": updatedAt,
-		}
 		orders = append(orders, order)
 	}
 
 	return orders, nil
 }
 
-func (r *OrderRepo) GetOrderDetails(orderID string) (map[string]interface{}, error) {
-	query := `
+func (r *OrderRepo) GetOrderDetails(orderID string) (*models.OrderResponse, error) {
+	var order models.OrderResponse
+
+	err := r.db.QueryRow(`
         SELECT order_id, user_id, status, created_at, updated_at
         FROM orders
         WHERE order_id = $1
-    `
-
-	row := r.db.QueryRow(query, orderID)
-
-	var orderIDResult, userID, status string
-	var createdAt, updatedAt string
-
-	err := row.Scan(&orderIDResult, &userID, &status, &createdAt, &updatedAt)
+    `, orderID).Scan(
+		&order.OrderID,
+		&order.UserID,
+		&order.Status,
+		&order.CreatedAt,
+		&order.UpdatedAt,
+	)
 	if err != nil {
 		return nil, err
 	}
 
-	order := map[string]interface{}{
-		"order_id":   orderIDResult,
-		"user_id":    userID,
-		"status":     status,
-		"created_at": createdAt,
-		"updated_at": updatedAt,
-	}
-
-	return order, nil
+	return &order, nil
 }
 
-func (r *OrderRepo) GetOrderEvents(orderID string) ([]map[string]interface{}, error) {
-	query := `
-        SELECT event_id, order_id, status, created_at, updated_at
+func (r *OrderRepo) GetOrderEvents(orderID string) ([]models.OrderEvent, error) {
+	rows, err := r.db.Query(`
+        SELECT event_id, order_id, user_id, status, created_at, updated_at
         FROM order_events
         WHERE order_id = $1
-        ORDER BY created_at ASC
-    `
-
-	rows, err := r.db.Query(query, orderID)
+    `, orderID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	var events []map[string]interface{}
-
+	var events []models.OrderEvent
 	for rows.Next() {
-		var eventID, orderIDResult, status string
-		var createdAt, updatedAt string
-
-		if err := rows.Scan(&eventID, &orderIDResult, &status, &createdAt, &updatedAt); err != nil {
+		var event models.OrderEvent
+		err := rows.Scan(
+			&event.EventID,
+			&event.OrderID,
+			&event.UserID,
+			&event.Status,
+			&event.CreatedAt,
+			&event.UpdatedAt,
+		)
+		if err != nil {
 			return nil, err
 		}
-
-		event := map[string]interface{}{
-			"event_id":   eventID,
-			"order_id":   orderIDResult,
-			"status":     status,
-			"created_at": createdAt,
-			"updated_at": updatedAt,
-		}
 		events = append(events, event)
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, err
 	}
 
 	return events, nil
