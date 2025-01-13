@@ -3,11 +3,13 @@ package repository
 import (
 	"JustDone/internal/config"
 	"JustDone/internal/models"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
 	_ "github.com/jackc/pgx/v4/stdlib"
 	"github.com/lib/pq"
+	"github.com/pressly/goose/v3"
 	"strconv"
 	"strings"
 )
@@ -27,22 +29,33 @@ func NewOrderRepo(cfg config.Postgres) (*OrderRepo, error) {
 		return nil, fmt.Errorf("failed to connect to database: %v", err)
 	}
 
+	if err := runMigrations(db); err != nil {
+		return nil, fmt.Errorf("failed to apply migrations to database: %v", err)
+	}
+
 	return &OrderRepo{db: db}, nil
 }
 
-func (r *OrderRepo) IsEventProcessed(eventID string) bool {
+func runMigrations(db *sql.DB) error {
+	if err := goose.Up(db, "./migrations"); err != nil {
+		return fmt.Errorf("goose migration failed: %w", err)
+	}
+	return nil
+}
+
+func (r *OrderRepo) IsEventProcessed(ctx context.Context, eventID string) bool {
 	var count int
-	r.db.QueryRow("SELECT COUNT(*) FROM order_events WHERE event_id = $1", eventID).Scan(&count)
+	r.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM order_events WHERE event_id = $1", eventID).Scan(&count)
 	return count > 0
 }
 
-func (r *OrderRepo) IsOrderFinalized(orderID string) bool {
+func (r *OrderRepo) IsOrderFinalized(ctx context.Context, orderID string) bool {
 	var status string
-	r.db.QueryRow("SELECT status FROM orders WHERE order_id = $1", orderID).Scan(&status)
+	r.db.QueryRowContext(ctx, "SELECT status FROM orders WHERE order_id = $1", orderID).Scan(&status)
 	return status == "failed" || status == "success"
 }
 
-func (r *OrderRepo) SaveOrderAndEvent(event models.WebhookPayload) error {
+func (r *OrderRepo) SaveOrderAndEvent(ctx context.Context, event models.WebhookPayload) error {
 	tx, err := r.db.Begin()
 	if err != nil {
 		return err
@@ -54,7 +67,7 @@ func (r *OrderRepo) SaveOrderAndEvent(event models.WebhookPayload) error {
 		return err
 	}
 
-	_, err = tx.Exec(`
+	_, err = tx.ExecContext(ctx, `
         INSERT INTO orders (order_id, user_id, status, created_at, updated_at, meta)
         VALUES ($1, $2, $3, $4, $5, $6)
         ON CONFLICT (order_id) DO UPDATE SET
@@ -67,7 +80,7 @@ func (r *OrderRepo) SaveOrderAndEvent(event models.WebhookPayload) error {
 		return err
 	}
 
-	_, err = tx.Exec(`
+	_, err = tx.ExecContext(ctx, `
         INSERT INTO order_events (event_id, order_id, user_id, status, created_at, updated_at)
         VALUES ($1, $2, $3, $4, $5, $6)
     `, event.EventID, event.OrderID, event.UserID, event.Status, event.CreatedAt, event.UpdatedAt)
@@ -79,7 +92,7 @@ func (r *OrderRepo) SaveOrderAndEvent(event models.WebhookPayload) error {
 	return tx.Commit()
 }
 
-func (r *OrderRepo) FetchOrders(filter models.OrderFilter) ([]models.OrderResponse, error) {
+func (r *OrderRepo) FetchOrders(ctx context.Context, filter models.OrderFilter) ([]models.OrderResponse, error) {
 	query := `
         SELECT order_id, user_id, status, created_at, updated_at
         FROM orders
@@ -106,7 +119,7 @@ func (r *OrderRepo) FetchOrders(filter models.OrderFilter) ([]models.OrderRespon
 	query += " LIMIT $" + strconv.Itoa(len(args)+1) + " OFFSET $" + strconv.Itoa(len(args)+2)
 	args = append(args, filter.Limit, filter.Offset)
 
-	rows, err := r.db.Query(query, args...)
+	rows, err := r.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -133,10 +146,10 @@ func (r *OrderRepo) FetchOrders(filter models.OrderFilter) ([]models.OrderRespon
 	return orders, nil
 }
 
-func (r *OrderRepo) GetOrderDetails(orderID string) (*models.OrderResponse, error) {
+func (r *OrderRepo) GetOrderDetails(ctx context.Context, orderID string) (*models.OrderResponse, error) {
 	var order models.OrderResponse
 
-	err := r.db.QueryRow(`
+	err := r.db.QueryRowContext(ctx, `
         SELECT order_id, user_id, status, created_at, updated_at
         FROM orders
         WHERE order_id = $1
@@ -154,8 +167,8 @@ func (r *OrderRepo) GetOrderDetails(orderID string) (*models.OrderResponse, erro
 	return &order, nil
 }
 
-func (r *OrderRepo) GetOrderEvents(orderID string) ([]models.OrderEvent, error) {
-	rows, err := r.db.Query(`
+func (r *OrderRepo) GetOrderEvents(ctx context.Context, orderID string) ([]models.OrderEvent, error) {
+	rows, err := r.db.QueryContext(ctx, `
         SELECT event_id, order_id, user_id, status, created_at, updated_at
         FROM order_events
         WHERE order_id = $1

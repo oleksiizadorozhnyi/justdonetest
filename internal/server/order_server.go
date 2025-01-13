@@ -17,8 +17,9 @@ type Server struct {
 }
 
 func NewServer(orderService *service.OrderService) (*Server, error) {
-
-	return &Server{service: orderService}, nil
+	return &Server{
+		service: orderService,
+	}, nil
 }
 
 func (s *Server) Run(addr string) error {
@@ -51,7 +52,7 @@ func (s *Server) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.service.CreateOrUpdateOrder(payload); err != nil {
+	if err := s.service.CreateOrUpdateOrder(r.Context(), payload); err != nil {
 		if strings.Contains(err.Error(), "event already processed") {
 			http.Error(w, "Event already processed", http.StatusConflict)
 		} else if strings.Contains(err.Error(), "order is in final state") {
@@ -69,7 +70,7 @@ func (s *Server) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 func (s *Server) GetOrders(w http.ResponseWriter, r *http.Request) {
 	filters := ParseOrderFilter(r.URL.Query())
 
-	orders, err := s.service.GetOrders(filters)
+	orders, err := s.service.GetOrders(r.Context(), filters)
 	if err != nil {
 		zap.L().Error("Failed to fetch orders", zap.Error(err))
 		http.Error(w, "Failed to fetch orders", http.StatusInternalServerError)
@@ -94,7 +95,7 @@ func (s *Server) GetOrderDetails(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	order, err := s.service.GetOrderDetails(orderID)
+	order, err := s.service.GetOrderDetails(r.Context(), orderID)
 	if err != nil {
 		if err.Error() == "order not found" {
 			http.Error(w, "Order not found", http.StatusNotFound)
@@ -116,7 +117,7 @@ func (s *Server) GetOrderEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	events, err := s.service.GetOrderEvents(orderID)
+	events, err := s.service.GetOrderEvents(r.Context(), orderID)
 	if err != nil {
 		zap.L().Error("Failed to fetch order events", zap.Error(err))
 		http.Error(w, "Failed to fetch order events", http.StatusInternalServerError)

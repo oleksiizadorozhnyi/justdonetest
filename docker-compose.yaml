@@ -36,11 +36,6 @@ services:
       SSL_MODE: "disable"
     ports:
       - "8080:8080"
-    entrypoint: >
-      bash -c "
-        goose -dir /migrations postgres postgres://user:password@db:5432/orders?sslmode=disable up &&
-        ./app
-        "
     depends_on:
       db:
           condition: service_healthy

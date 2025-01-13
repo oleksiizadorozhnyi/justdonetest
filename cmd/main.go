@@ -2,7 +2,7 @@ package main
 
 import (
 	"JustDone/internal/config"
-	repository "JustDone/internal/repository/postgres"
+	"JustDone/internal/repository/postgres"
 	"JustDone/internal/server"
 	"JustDone/internal/service"
 	"fmt"
@@ -46,8 +46,8 @@ func main() {
 		logger.Fatal(err.Error())
 	}
 
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, syscall.SIGTERM, os.Interrupt)
 
 	go func() {
 		logger.Info(fmt.Sprintf("Server Running on %v...", cfg.ServerPort))
@@ -56,6 +56,6 @@ func main() {
 		}
 	}()
 
-	<-quit
+	<-ch
 	logger.Info("Received stop signal, shutting down the server...")
 }
